@@ -121,6 +121,7 @@ module RedmineOpenidConnect
             mail: user_info["email"],
             mail_notification: 'only_my_events',
             last_login_on: Time.now
+
           }
 
           user.assign_attributes attributes
@@ -129,6 +130,7 @@ module RedmineOpenidConnect
             user.update_attribute(:admin, oic_session.admin?)
             oic_session.user_id = user.id
             oic_session.save!
+            update_user_groups(user, oic_session.claims["group"])
             # after user creation just show "My Page" don't redirect to remember
             successful_authentication(user)
           else
@@ -140,6 +142,9 @@ module RedmineOpenidConnect
             return invalid_credentials
           end
         else
+          # Benutzer existiert, Gruppen aus ID-Token hinzufügen
+          update_user_groups(user, oic_session.claims["group"])
+
           user.update_attribute(:admin, oic_session.admin?)
           oic_session.user_id = user.id
           oic_session.save!
@@ -152,7 +157,37 @@ module RedmineOpenidConnect
         end # if user.nil?
       end
     end
+    # Methode, um Benutzergruppen zu aktualisieren und einen Ein-Weg-Sync zu implementieren
+    def update_user_groups(user, groups)
+      # Falls keine Gruppen im Token vorhanden sind, entfernen wir alle Gruppenmitgliedschaften des Benutzers in Redmine
+      if groups.nil? || !groups.is_a?(Array) || groups.empty?
+        user.groups.each do |group|
+          user.groups.delete(group)
+        end
+        logger.info "Alle Gruppenmitgliedschaften des Benutzers wurden entfernt, da keine Gruppen im Token enthalten waren."
+        return
+      end
 
+      # Bestehende Gruppen des Benutzers in Redmine abrufen
+      existing_groups = user.groups
+
+      # Gruppen aus dem Token in Redmine finden oder hinzufügen
+      groups.each do |group_name|
+        group = Group.find_by_lastname(group_name)
+        if group
+          # Gruppe hinzufügen, wenn der Benutzer nicht bereits Mitglied ist
+          user.groups << group unless user.groups.include?(group)
+        else
+          logger.warn "Gruppe '#{group_name}' existiert nicht in Redmine"
+        end
+      end
+
+      # Benutzer aus Gruppen entfernen, die nicht im Token enthalten sind
+      groups_to_remove = existing_groups.reject { |group| groups.include?(group.lastname) }
+      groups_to_remove.each do |group|
+        user.groups.delete(group)
+      end
+    end
     def password_authentication
       user = User.find_by_login(params[:username])
       if OicSession.enabled? and !user.nil? and !user.auth_source.nil? and OicSession.disallowed_auth_sources_login.map(&:to_i).include? user.auth_source.id
